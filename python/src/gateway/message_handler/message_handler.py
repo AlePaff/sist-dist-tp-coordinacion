@@ -15,4 +15,5 @@ class MessageHandler:
 
     def deserialize_result_message(self, message):
         fields = message_protocol.internal.deserialize(message)
+        print(f"fieldssss {fields}")
         return fields

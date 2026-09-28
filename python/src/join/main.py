@@ -16,9 +16,11 @@ TOP_SIZE = int(os.environ["TOP_SIZE"])
 class JoinFilter:
 
     def __init__(self):
+        # obtiene la cola de entrada (la que viene del aggregation)
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, INPUT_QUEUE
         )
+        # obtiene la cola de salida (la que va al gateway)
         self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, OUTPUT_QUEUE
         )

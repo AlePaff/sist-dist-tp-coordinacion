@@ -15,15 +15,21 @@ OUTPUT_QUEUE = os.environ["OUTPUT_QUEUE"]
 
 
 def handle_client_request(client_socket, message_handler):
+    # aca se publican los mensajes que el cliente envíe, en la cola de rabbitMQ
+    # es la cola "de salida" porque "salen" hacia el backend
+    # el gateway escribe (output del gateway, input del backend)
     output_queue = middleware.MessageMiddlewareQueueRabbitMQ(MOM_HOST, OUTPUT_QUEUE)
 
     try:
         while True:
             message = message_protocol.external.recv_msg(client_socket)
 
+            # recibe una fruta y se la manda al message_handler
             if message[0] == message_protocol.external.MsgType.FRUIT_RECORD:
                 serialized_message = message_handler.serialize_data_message(message[1])
+                # se envia a la cola de salida de rabbitMQ
                 output_queue.send(serialized_message)
+                # se envia ack al cliente confirmando recepción
                 message_protocol.external.send_msg(
                     client_socket, message_protocol.external.MsgType.ACK
                 )
@@ -43,8 +49,12 @@ def handle_client_request(client_socket, message_handler):
         output_queue.close()
 
 
+# consume respuestas del top y se las reenvia al cliente correspondiente
+# o sea le manda el "top" de frutas
 def handle_client_response(client_list):
-    input_queue = middleware.MessageMiddlewareQueueRabbitMQ(MOM_HOST, INPUT_QUEUE)
+    input_queue = middleware.MessageMiddlewareQueueRabbitMQ(MOM_HOST, INPUT_QUEUE)      # se conecta a la cola de entrada
+    # se llama de "entrada" porque vienen desde el servidor procesadas y se reenvian al cliente
+    # "entran" al backend (input del gateway, output del backend)
 
     def _consume_result(message, ack, nack):
         client_index = 0
@@ -90,16 +100,19 @@ def handle_sigterm(server_socket, client_list, sigterm_received):
 def main():
     logging.basicConfig(level=logging.INFO)
 
+    # manager permite crear estructuras (listas, diccionarios, etc) que pueden ser compartidas y modificadas entre procesos hijos
     with multiprocessing.Manager() as manager:
-        client_list = manager.list()
-        sigterm_received = manager.Value("c_short", 0)
-        with multiprocessing.Pool(processes=os.process_cpu_count()) as processes_pool:
-            processes_pool.apply_async(handle_client_response, (client_list,))
+        client_list = manager.list()        # lista compartida entre procesos
+        sigterm_received = manager.Value("c_short", 0)      # señal compartida entre procesos para el sigterm
+        with multiprocessing.Pool(processes=os.process_cpu_count()) as processes_pool:      # pool de procesos con tantos workers como CPUs disponibles
+            processes_pool.apply_async(handle_client_response, (client_list,))      # lanza la funcion asincrona (sin bloquear) handle_client_response en uno de los procesos
 
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
                 logging.info("Listening to connections")
                 server_socket.bind((SERVER_HOST, SERVER_PORT))
-                server_socket.listen()
+                server_socket.listen()      # se queda escuchando conexiones entrantes
+
+                # crea la señal para un sigterm
                 signal.signal(
                     signal.SIGTERM,
                     lambda signum, frame: handle_sigterm(
@@ -111,7 +124,9 @@ def main():
                         client_socket, _ = server_socket.accept()
 
                         logging.info("A new client has connected")
+                        # crea una instancia para manejar a un cliente conectado
                         message_handler_instance = message_handler.MessageHandler()
+                        # lo guarda en la lista de clientes
                         client_list.append([message_handler_instance, client_socket])
                         processes_pool.apply_async(
                             handle_client_request,

@@ -11,11 +11,49 @@ Los 5 escenarios se tienen que cumplir
 
 De los listados en azul en el diagrama el unico que se puede modificar es el message_handler en el gateway. Despues todos los que estan en blanco.
 
+
 ## Interpretación "Limitaciones del esqueleto provisto"
- - No se implementa la interfaz del middleware. -> el middleware es el tp anterior y ya fué implementado, es copiar y pegar.
- - No se dividen los flujos de datos de los clientes más allá del Gateway, por lo que no se es capaz de resolver múltiples consultas concurrentemente. -> esta es la parte a implementar y discriminar, por eso cuando pongo varios clientes rompe actualmente.
+ - No se implementa la interfaz del middleware. 
+ -> el middleware es el tp anterior y ya fué implementado, es copiar y pegar.
+
+ - No se dividen los flujos de datos de los clientes más allá del Gateway, por lo que no se es capaz de resolver múltiples consultas concurrentemente.
+  -> esta es la parte a implementar y discriminar, por eso cuando pongo varios clientes rompe actualmente.
+
  - No se implementan mecanismos de sincronización que permitan escalar los controles Sum y Aggregator. En particular:
-   - No se puede escalar respecto a grandes volúmenes de datos transmitidos desde los clientes. -> la idea es tambien escalar en la situación donde un cliente viene con un volumen muy grande de datos, y que el sistema pueda trabajar concurrentemente, ya sea un cliente con muchos datos o multiples clientes con datos
-   - Las instancias de Sum se dividen el trabajo, pero solo una de ellas recibe la notificación de finalización en la ingesta de datos. -> ahora mismo no se sabe cuando se terminaron de procesar los datos, en un ambiente distribuido es muy dificil
-   - Las instancias de Sum realizan _broadcast_ a todas las instancias de Aggregator, en lugar de agrupar los datos por algún criterio y evitar procesamiento redundante. -> la idea es repartir el trabajo eficientemente
-  - No se maneja la señal SIGTERM, con la salvedad de los clientes y el Gateway. -> hay que manejar esto
+   - No se puede escalar respecto a grandes volúmenes de datos transmitidos desde los clientes. 
+   -> la idea es tambien escalar en la situación donde un cliente viene con un volumen muy grande de datos, y que el sistema pueda trabajar concurrentemente, ya sea un cliente con muchos datos o multiples clientes con datos
+
+   - Las instancias de Sum se dividen el trabajo, pero solo una de ellas recibe la notificación de finalización en la ingesta de datos. 
+   -> ahora mismo no se sabe cuando se terminaron de procesar los datos, en un ambiente distribuido es muy dificil
+
+   - Las instancias de Sum realizan _broadcast_ a todas las instancias de Aggregator, en lugar de agrupar los datos por algún criterio y evitar procesamiento redundante. 
+   -> la idea es repartir el trabajo eficientemente
+
+  - No se maneja la señal SIGTERM, con la salvedad de los clientes y el Gateway.
+   -> hay que manejar esto
+
+
+## Threading vs multiprocessing
+threading en el tp0 eran para hilos dentro de un mismo proceso, eran afectados por el GIL, habia un costo "bajo" de crear threads.
+En multiprocessing son procesos diferentes, no son afectados por el GIL cada proceso tiene su propio interprete, tienen un costo alto de creación.
+
+
+
+
+## Arquitectura
+1 cliente:
+  cliente ---TPC--->   gateway 
+    ----RabbitMQ(input_queue)---->    sum  
+        ---RabbitMQ(por exchange a cada queue)---->   aggregation                               su output queue es "join_queue"
+            ----RabbitMQ(output queue es 'join_queue')---->  join                           su input queue es "join_queue", su output queue es "results_queue"
+              ----RabbitMQ----> gateway  ----> Cliente
+
+
+
+## Comandos utiles
+Para ver solo los logs de un servicio en particular, por ejemplo el gateway
+> docker compose logs gateway
+
+
+
+
