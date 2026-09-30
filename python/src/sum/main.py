@@ -2,6 +2,9 @@ import os
 import logging
 import threading
 
+import pika
+
+
 from common import middleware, message_protocol, fruit_item
 
 ID = int(os.environ["ID"])
@@ -14,50 +17,82 @@ AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 
 class SumFilter:
+
+    def _build_data_output_exchanges(self):
+        # crea exchanges (es la oficina de correos, mensajes para ser despachados a las distintas queues)
+        return [
+            # pone las routing keys
+            middleware.MessageMiddlewareExchangeRabbitMQ(
+                MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{i}"]
+            )
+            for i in range(AGGREGATION_AMOUNT)
+        ]
+
+    def _build_control_exchange(self):
+        # exchange de control (direct: enviar a X routing keys) para sincronizar EOFs entre instancias de SUM
+        return middleware.MessageMiddlewareExchangeRabbitMQ(
+            MOM_HOST, SUM_CONTROL_EXCHANGE, ["eof_routing_key"]
+        )
+
+
     def __init__(self):
-        # viene del gateway la queue
+        self.sum_id = ID
+         # acumula el total por fruta
+        self.amount_by_fruit_by_client = {}
+        self.state_lock = threading.Lock()
+
+        # NOTE
+        # dos instancias de un mismo exchange para que no choquen los hilos debido a que pika no es thread safe
+        # tanto para los exchanges de salida (control_data_outputs y main_data_output_exchanges) como los de control (main_control_publisher y control_consumer)
+
+        # -- recursos hilo principal (main) --
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, INPUT_QUEUE
         )
-        self.data_output_exchanges = []
-        # crea exchanges (es la oficina de correos, mensajes para ser despachados a las distintas queues)
-        for i in range(AGGREGATION_AMOUNT):
-            # pone las routing keys
-            data_output_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
-                MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{i}"]
-            )
-            self.data_output_exchanges.append(data_output_exchange)
-        # acumula el total por fruta
-        self.amount_by_fruit_by_client = {}
+        self.main_data_output_exchanges = self._build_data_output_exchanges()
+        self.main_control_publisher = self._build_control_exchange()  # solo send(), usado por hilo principal
+
+        # -- recursos del hilo de control (control) --
+        self.control_consumer = self._build_control_exchange()   # solo start_consuming(), usado por hilo secundario
+        self.control_data_outputs = self._build_data_output_exchanges()
+
+
+        
+
+
 
     def _process_data(self, client_id, fruit, amount):
-        logging.info(f"Process data: client_id:{client_id} - {fruit},{amount}")
-        amount_by_fruit = self.amount_by_fruit_by_client.setdefault(client_id, {})      # pone las frutas del cliente si ya existe, si no existe crea uno vacío
-        # recibe una fruta y una cantidad y va sumando.
-        # suma al acumulado de una fruta, o un fruitItem con amount 0 si no existe
-        amount_by_fruit[fruit] = amount_by_fruit.get(
-            fruit, fruit_item.FruitItem(fruit, 0)
-        ) + fruit_item.FruitItem(fruit, int(amount))
+        # se van sumando las frutas y se guardan localmente
+        with self.state_lock:
+            # logging.info(f"Process data: client_id:{client_id} - {fruit},{amount}")
+            amount_by_fruit = self.amount_by_fruit_by_client.setdefault(client_id, {})      # pone las frutas del cliente si ya existe, si no existe crea uno vacío
+            # recibe una fruta y una cantidad y va sumando.
+            # suma al acumulado de una fruta, o un fruitItem con amount 0 si no existe
+            amount_by_fruit[fruit] = amount_by_fruit.get(
+                fruit, fruit_item.FruitItem(fruit, 0)
+            ) + fruit_item.FruitItem(fruit, int(amount))
 
-    def _process_eof(self, client_id):
-        logging.info(f"Broadcasting data messages for client {client_id}")
+
+    def _flush_client(self, client_id, data_outputs):
+        """Envía el acumulado + EOF a los aggregators usando las conexiones
+        que le pasan (las del hilo que la llama). Aca no se avisa a otros SUM."""
+
+        # logging.info(f"Broadcasting data messages for client {client_id}")
         # obtiene el acumulado del cliente que termino (y lo saca del dict)
-        amount_by_fruit = self.amount_by_fruit_by_client.pop(client_id, {})
+        with self.state_lock:
+            amount_by_fruit = self.amount_by_fruit_by_client.pop(client_id, {})
 
         # al recibir EOF emite a cada exchange el total acumulado por cada fruta (ej. banana 3, manzana 7, etc. a cada aggregation)
         # de un cliente en particular
         for final_fruit_item in amount_by_fruit.values():
-            for data_output_exchange in self.data_output_exchanges:
-                data_output_exchange.send(
-                    message_protocol.internal.serialize(
-                        [client_id, final_fruit_item.fruit, final_fruit_item.amount]
-                    )
-                )
+            for out in data_outputs:
+                out.send(message_protocol.internal.serialize(
+                    [client_id, final_fruit_item.fruit, final_fruit_item.amount]
+                ))
 
         logging.info(f"Broadcasting EOF message for client {client_id}")
-        for data_output_exchange in self.data_output_exchanges:
-            data_output_exchange.send(message_protocol.internal.serialize([client_id]))
-
+        for out_exchange in data_outputs:
+            out_exchange.send(message_protocol.internal.serialize([client_id]))
 
     def process_data_messsage(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
@@ -66,15 +101,48 @@ class SumFilter:
             self._process_data(*fields)
         # en cualquier otro caso se interpreta como EOF
         else:
-            self._process_eof(*fields)
+            client_id = fields[0]
+            logging.info(f"Recibido un EOF de parte del client:{client_id}")
+            # envía el acumulado y le avisa a los aggregators del EOF
+            self._flush_client(client_id, self.main_data_output_exchanges)
+            # avisar a los demas SUM (solo acá en el hilo principal, no en el hilo de control)
+            self.main_control_publisher.send(
+                message_protocol.internal.serialize([client_id, self.sum_id])
+            )
+        ack()
+
+    
+
+    # callback del hilo secundario - se queda escuchando a los mensajes EOF que vienen del exchange
+    def process_control_eof(self, message, ack, nack):
+        client_id, sum_sender_id = message_protocol.internal.deserialize(message)
+
+        # para no enviarse a si mismo
+        if sum_sender_id != self.sum_id:
+            logging.info(f"process_control_eof: recibido un EOF de sum:{sum_sender_id} con client:{client_id}")
+            # self._process_eof(client_id)
+            self._flush_client(client_id, self.control_data_outputs)
+
+        
         ack()
 
     def start(self):
+        # en un hilo aparte, se espera recibir mensajes del exchange de control
+        control_thread = threading.Thread(
+                target=self.control_consumer.start_consuming,
+                args=(self.process_control_eof,),
+                daemon=True,  # si el thread principal termina mata a este thread secundario. Con False (default) espera a que termine
+            )
+        control_thread.start()
+
+        
         # inicia el consumo de la cola de entrada
         self.input_queue.start_consuming(self.process_data_messsage)
 
 def main():
     logging.basicConfig(level=logging.INFO)
+    #TODO: Borrar esta linea, es solo para debug
+    logging.getLogger("pika").setLevel(logging.ERROR)
     sum_filter = SumFilter()
     sum_filter.start()
     return 0
