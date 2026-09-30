@@ -27,25 +27,36 @@ class AggregationFilter:
         # ejemplo ---> {client_id: [FruitItem, ...]
         self.fruit_top_by_client = {}
 
-    def _process_data(self, client_id, fruit, amount):
+        # recien cuando sé cuantos sums terminaron puedo hacer el join
+        # ejemplo --> {client_0: 3, client_1: 1, ...}
+        self.eof_count_by_client = {}
+
+
+    def _process_data(self, client_id, fruit, amount): 
         # se procesa por cada mensaje que llega
         logging.info("Processing data message")
         fruit_top = self.fruit_top_by_client.setdefault(client_id, [])
 
         # itera todos los tops de frutas
         for i in range(len(fruit_top)):
-            # si el mensaje recibido es una fruta,cantidad que ya existe
+            # si el mensaje recibido es una (fruta,cantidad) que ya existe
             if fruit_top[i].fruit == fruit:
-                # se suma al top (no duplica la fruta y suma la cantidad)
-                fruit_top[i] = fruit_top[i] + fruit_item.FruitItem(
-                    fruit, amount
-                )
+                # para asegurarme que esté siempre ordenada: quito el elemento, lo sumo, luego lo añado en orden
+                # Ejemplo: si tengo fruit_top=[apple:10, melon:30, banana:35] y debo agregar [apple:40]
+                updated = fruit_top.pop(i) + fruit_item.FruitItem(fruit, amount)
+                bisect.insort(fruit_top, updated)
+
                 return
         # inserta el item fruit_top, usando la comparación de FruitItem. Bisect asume que la lista siempre está ordenada, sino falla
         bisect.insort(fruit_top, fruit_item.FruitItem(fruit, amount))
 
     def _process_eof(self, client_id):
         logging.info(f"Received EOF for client {client_id}")
+
+        # solo continúa cuando recibió el EOF de todos los sums
+        if not self._check_eof_by_client(client_id): 
+            return
+
         # obtiene el top del cliente que termino (y lo saca del dict)
         fruit_top_list = self.fruit_top_by_client.pop(client_id, [])
 
@@ -60,10 +71,25 @@ class AggregationFilter:
         # manda el top al join conservando el identificador del cliente
         self.output_queue.send(message_protocol.internal.serialize([client_id, fruit_top]))
 
+    def _check_eof_by_client(self, client_id):
+        # incrementa el contador de EOFs de este cliente
+        self.eof_count_by_client[client_id] = (
+            self.eof_count_by_client.get(client_id, 0) + 1
+        )
+        logging.info(f"EOF count for client {client_id}: {self.eof_count_by_client[client_id]}/{SUM_AMOUNT}")
+
+        # todavía no llegaron todos los parciales: no emitir
+        if self.eof_count_by_client[client_id] < SUM_AMOUNT:
+            return False
+
+        # ya llegaron todos: limpiar el contador y emitir
+        self.eof_count_by_client.pop(client_id, None)
+        return True
+
 
     def process_messsage(self, message, ack, nack):
-        logging.info("Process message")
         fields = message_protocol.internal.deserialize(message)
+        logging.info(f"Process message with fields {fields}")
         #si recibe una fruta procesa la data, caso contrario se interpreta como EOF
         if len(fields) == 3:
             self._process_data(*fields)
