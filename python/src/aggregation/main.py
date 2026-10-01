@@ -39,7 +39,6 @@ class AggregationFilter:
         )
 
     def _process_data(self, client_id, fruit, amount): 
-        # se procesa por cada mensaje que llega
         logging.debug("Processing data message")
         fruit_top = self.fruit_top_by_client.setdefault(client_id, [])
 

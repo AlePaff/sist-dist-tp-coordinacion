@@ -1,15 +1,15 @@
 # Informe - TP Coordinación
 
 ## Estructura
-Se utilizará Python como lenguaje principal. Son 5 main.py (cliente, gateway, sum, aggregation, join) más el middleware que se reutiliza del TP anterior.
+Se utiliza Python como lenguaje principal. Son 5 main.py (cliente, gateway, sum, aggregation, join) más el middleware que se reutiliza del TP anterior.
 
 De los elementos marcados en azul en el diagrama del README, el único modificable en el gateway es `message_handler`. El resto de los componentes modificables son `sum`, `aggregation`, `join` y el protocolo interno (`common/message_protocol/internal.py`).
 
 ## Arquitectura general
 El flujo de un cliente es:
 ```
-Para 1 cliente:
-  Cliente ---TPC--->   Gateway 
+A modo de ejemplo para 1 cliente para el escenario 2.
+  Cliente ---TCP--->   Gateway 
     ----RabbitMQ(input_queue)---->  Sum  
         ---RabbitMQ(por exchange a cada queue)---->   Aggregation                       su output queue es "join_queue"
             ----RabbitMQ(output queue es 'join_queue')---->  Join                       su input queue es "join_queue", su output queue es "results_queue"
@@ -45,12 +45,12 @@ En el sum hay dos threads
 - `SUM_CONTROL_EXCHANGE`: avisos de EOF de otros sums (hilo secundario).
 
 ##### Observacion
-No hay orden garantizado entre los mensajes. El state_lock garantiza que dos threads no toquen el mismo diccionario al mismo tiempo. Eso evita que _process_data y _flush_client corrompan el estado. Pero no garantiza que todos los datos ya estén procesados cuando llega el aviso de control, se puede solucionar poniendo el prefetch=1 en el Middleware, de esa forma solo habrá 1 mensaje procesandose a la vez, reduciendo enormemente la posibilidad de una race condition. 
+No hay orden garantizado entre los mensajes. El state_lock garantiza que dos threads no toquen el mismo diccionario al mismo tiempo. Eso evita que _process_data y _flush_client corrompan el estado. Pero no garantiza que todos los datos ya estén procesados cuando llega el aviso de control, se puede solucionar poniendo el prefetch_count=1 en el Middleware, de esa forma solo habrá 1 mensaje procesandose a la vez, reduciendo enormemente la posibilidad de una race condition. Lo dejé comentado en el codigo, en todo caso se descomenta.
 En los tests funciona sin poner el prefetch=1 debido al volumen de los datasets y dado que los sums procesan rapido
 
 ### Coordinación de Aggregation
 Cuando hay N sums y M aggregators:
-- Cada sum emite sus parciales a un aggregator (elegido por hash)
+- Cada sum emite sus parciales a un aggregator (elegido por hash con crc32 sobre client:fruta. No se usa hash de python porque es aleatorio por proceso)
 - Cada sum emite su EOF a todos los aggregators.
 
 Como cada sum manda su propio EOF, el aggregation recibe N EOFs por cliente (uno por cada sum). No puede emitir el top con el primero que llega, porque le faltarían los parciales de los otros sums. Para ello se hace un conteo de EOFs
@@ -64,7 +64,49 @@ El join mantiene, por cliente, una lista de parciales y un contador (partials_by
 
 ### Manejo de SIGTERM
 Los nodos sum, aggregation y join registran un handler para SIGTERM en main().
-> signal.signal(signal.SIGTERM, sum_filter.handle_sigterm)
-
 El handler pide frenar el consumo de cada conexión usando add_callback_threadsafe, que es la forma thread-safe que tiene pika para encolar una operación en el hilo dueño de la conexión.
+
+
+### Escalabilidad
+##### Escalado respecto a clientes
+El gateway atiende a cada cliente en un proceso separado. Cada cliente tiene su propia instancia de MessageHandler con un client_id único que viaja en todos los mensajes internos.
+
+En sum, aggregation y join, el estado se mantiene por cliente (amount_by_fruit_by_client[client_id], fruit_top_by_client[client_id], partials_by_client[client_id]). Eso permite procesar varios clientes concurrentemente sin que se mezclen sus acumulados.
+
+##### Escalado respecto a volumen de datos
+N sums reparten los mensajes de input_queue (working queue). A mayor cantidad de instancias de sums, menor mensajes dentra cada uno
+
+M aggregators se reparten las frutas por hash. A mayor cantidad de instancias de aggregators, mens frutas por aggregator
+
+El estado en cada sum y aggregation se mantiene en memoria
+
+##### Escalado respecto a la cantidad de controles
+Con más sums y más aggregators, el sistema escala linealmente:
+
+Sums: RabbitMQ reparte round-robin. Cada sum procesa 1/N de los mensajes.
+
+Aggregators: el hash `zlib.crc32(f"{client_id}:{fruit}") % M` distribuye las frutas entre los M aggregators. Como incluye el client_id, distribuye entre clientes también, evitando que todas las frutas de un cliente caigan en el mismo aggregator.
+
+Join: espera M parciales por cliente.
+
+##### Sharding por hash
+Para repartir las frutas entre los aggregators se usa:
+
+> idx = zlib.crc32(f"{client_id}:{fruit}".encode()) % AGGREGATION_AMOUNT
+
+Se incluye el client_id porque sino todas las apariciones de una fruta irían al mismo aggregator. Eso sesga la distribución si un cliente manda pocas frutas distintas. Con (client_id, fruit), el agregado se distribuye entre clientes.
+
+Nota: como decia una consulta en el foro, el sistema es escalable, no elástico. Cambiar AGGREGATION_AMOUNT requiere reiniciar todos los procesos. No se soporta agregar o quitar nodos durante la ejecución.
+
+
+### Limitaciones conocidas
+El middleware (sin modificaciones respecto al TP anterior) crea una queue exclusiva cada vez que se instancia un MessageMiddlewareExchangeRabbitMQ, independientemente de si la instancia se usará para consumir o solo para publicar.
+En el diseño actual del sum hay varias instancias que se usan solo para publicar:
+- main_control_publisher: publica avisos de EOF al exchange de control.
+- main_data_output_exchanges: publican los parciales a los aggregators.
+- control_data_outputs: ídem para el hilo de control.
+Cada una de esas instancias crea una queue bindeada al exchange correspondiente pero no son consumidos por nadie. Los mensajes que llegan a esas queues se acumulan en RabbitMQ hasta que el proceso termina.
+
+Con los volúmenes del TP el impacto es despreciable. En una corrida prolongada con alto tráfico, esas queues podrían crecer y consumir memoria del broker. La solución limpia sería exponer un modo solo publicar en el middleware, que omita la creación de la queue. Si se quisiera, se agregaría un parámetro opcional al constructor (por ejemplo, create_queue=True/False)
+
 
