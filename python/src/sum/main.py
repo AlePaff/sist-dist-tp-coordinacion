@@ -1,8 +1,6 @@
 import os
 import logging
 import threading
-
-import pika
 import zlib
 
 from common import middleware, message_protocol, fruit_item
@@ -41,10 +39,6 @@ class SumFilter:
         self.amount_by_fruit_by_client = {}
         self.state_lock = threading.Lock()
 
-        # NOTE
-        # dos instancias de un mismo exchange para que no choquen los hilos debido a que pika no es thread safe
-        # tanto para los exchanges de salida (control_data_outputs y main_data_output_exchanges) como los de control (main_control_publisher y control_consumer)
-
         # -- recursos hilo principal (main) --
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, INPUT_QUEUE
@@ -68,7 +62,7 @@ class SumFilter:
     def _process_data(self, client_id, fruit, amount):
         # se van sumando las frutas y se guardan localmente
         with self.state_lock:
-            # logging.info(f"Process data: client_id:{client_id} - {fruit},{amount}")
+            logging.info(f"Process data: client_id:{client_id} - {fruit},{amount}")
             amount_by_fruit = self.amount_by_fruit_by_client.setdefault(client_id, {})      # pone las frutas del cliente si ya existe, si no existe crea uno vacío
             # recibe una fruta y una cantidad y va sumando.
             # suma al acumulado de una fruta, o un fruitItem con amount 0 si no existe

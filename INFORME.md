@@ -97,6 +97,11 @@ Los demás vacían su acumulado: Al recibir el aviso, las otras instancias enví
 
 
 
+        # NOTE
+        # dos instancias de un mismo exchange para que no choquen los hilos debido a que pika no es thread safe
+        # tanto para los exchanges de salida (control_data_outputs y main_data_output_exchanges) como los de control (main_control_publisher y control_consumer)
+
+
 
 
 ##### Ejemplo

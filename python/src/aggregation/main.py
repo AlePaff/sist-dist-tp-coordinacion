@@ -34,7 +34,7 @@ class AggregationFilter:
 
     def _process_data(self, client_id, fruit, amount): 
         # se procesa por cada mensaje que llega
-        logging.info("Processing data message")
+        logging.debug("Processing data message")
         fruit_top = self.fruit_top_by_client.setdefault(client_id, [])
 
         # itera todos los tops de frutas
@@ -111,64 +111,3 @@ def main():
 if __name__ == "__main__":
     main()
 
-
-
-
-
-
-"""
-Ejemplo de secuencia temporal real
-Supongamos que el SumFilter manda esto (en orden):
-
-text
-1. ["manzana", 5]
-2. ["naranja", 3]
-3. ["manzana", 2]
-4. ["pera", 7]
-5. []              ← EOF
-Mensaje 1: ["manzana", 5]
-python
-def _process_data(self, fruit, amount):
-    for i in range(len(self.fruit_top)):   # len = 0 → no itera
-        ...
-    bisect.insort(self.fruit_top, FruitItem("manzana", 5))
-self.fruit_top está vacía → el for no ejecuta nada.
-
-bisect.insort inserta FruitItem("manzana", 5).
-
-Ahora self.fruit_top = [FruitItem("manzana", 5)].
-
-Acá tenés razón: en el primer mensaje, el for no hace nada. Pero eso es solo el primer mensaje.
-
-Mensaje 2: ["naranja", 3]
-python
-def _process_data(self, fruit, amount):
-    for i in range(len(self.fruit_top)):   # len = 1 → itera i=0
-        if self.fruit_top[0].fruit == "naranja":  # "manzana" == "naranja" → False
-            ...
-    bisect.insort(self.fruit_top, FruitItem("naranja", 3))
-Ahora len(self.fruit_top) == 1 → el for sí itera una vez (i=0).
-
-Compara "manzana" == "naranja" → False → no entra al if.
-
-bisect.insort inserta FruitItem("naranja", 3).
-
-Ahora self.fruit_top = [FruitItem("manzana", 5), FruitItem("naranja", 3)] (ordenado por lo que defina FruitItem).
-
-Mensaje 3: ["manzana", 2]
-python
-def _process_data(self, fruit, amount):
-    for i in range(len(self.fruit_top)):   # len = 2 → itera i=0, i=1
-        if self.fruit_top[0].fruit == "manzana":   # True en i=0
-            self.fruit_top[0] = self.fruit_top[0] + FruitItem("manzana", 2)
-            return
-len == 2 → itera.
-
-En i=0, self.fruit_top[0].fruit == "manzana" → True.
-
-Suma: FruitItem("manzana", 5) + FruitItem("manzana", 2) = FruitItem("manzana", 7).
-
-Reemplaza self.fruit_top[0] y retorna (no inserta de nuevo).
-
-Acá el for es esencial: evita duplicar la fruta y acumula el amount.
-"""

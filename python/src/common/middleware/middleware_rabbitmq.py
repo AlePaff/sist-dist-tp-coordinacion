@@ -16,9 +16,6 @@ _DISCONNECTED_ERRORS = (
     pika.exceptions.ConnectionClosedByBroker,
 )
 
-#TODO: Borrar esta linea, es solo para debug
-logging.getLogger("pika").setLevel(logging.ERROR)
-
 class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
 
     def __init__(self, host, queue_name):
