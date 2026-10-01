@@ -31,6 +31,11 @@ class JoinFilter:
         # 1 parcial del cliente 0 con esos dos FruitItem
         self.partials_by_client = {}
 
+    def handle_sigterm(self, signum, frame):
+        logging.info("Received SIGTERM signal")
+        self.input_queue.connection.add_callback_threadsafe(
+            self.input_queue.stop_consuming
+        )
 
     def process_messsage(self, message, ack, nack):
         client_id, partial_top_tuple = message_protocol.internal.deserialize(message)
@@ -54,7 +59,11 @@ class JoinFilter:
         ack()
 
     def start(self):
-        self.input_queue.start_consuming(self.process_messsage)
+        try:
+            self.input_queue.start_consuming(self.process_messsage)
+        finally:
+            self.input_queue.close()
+            self.output_queue.close()
 
 
 def main():

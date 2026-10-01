@@ -1,5 +1,6 @@
 import os
 import logging
+import signal
 import threading
 import zlib
 
@@ -125,22 +126,44 @@ class SumFilter:
         
         ack()
 
+
+    def handle_sigterm(self, signum, frame):
+        logging.info("Received SIGTERM signal")
+        self.input_queue.connection.add_callback_threadsafe(
+            self.input_queue.stop_consuming
+        )
+        self.control_consumer.connection.add_callback_threadsafe(
+            self.control_consumer.stop_consuming
+        )
+
     def start(self):
         # en un hilo aparte, se espera recibir mensajes del exchange de control
         control_thread = threading.Thread(
                 target=self.control_consumer.start_consuming,
-                args=(self.process_control_eof,),
-                daemon=True,  # si el thread principal termina mata a este thread secundario. Con False (default) espera a que termine
+                args=(self.process_control_eof,)
             )
         control_thread.start()
-
         
         # inicia el consumo de la cola de entrada
         self.input_queue.start_consuming(self.process_data_messsage)
 
+
+        # el hilo principal salió (SIGTERM o error): esperar al de control
+        control_thread.join()
+
+        # cerrar todo, cada recurso en su hilo correspondiente
+        self.input_queue.close()
+        self.control_consumer.close()
+        self.main_control_publisher.close()
+        for e in self.main_data_output_exchanges:
+            e.close()
+        for e in self.control_data_outputs:
+            e.close()
+
 def main():
     logging.basicConfig(level=logging.INFO)
     sum_filter = SumFilter()
+    signal.signal(signal.SIGTERM, sum_filter.handle_sigterm)
     sum_filter.start()
     return 0
 
