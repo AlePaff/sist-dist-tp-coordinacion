@@ -25,12 +25,35 @@ class JoinFilter:
             MOM_HOST, OUTPUT_QUEUE
         )
 
+        # {client_id: [cantidad de parciales recibidos, [FruitItem, ...]]}
+        #                     entry0                           entry1
+        # ejemplo --> 0: [1, [FruitItem("manzana", 12), FruitItem("kiwi", 10)]]
+        # 1 parcial del cliente 0 con esos dos FruitItem
+        self.partials_by_client = {}
+
+
     def process_messsage(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
         if len(fields) == 2:
-            client_id, fruit_top = fields
+            client_id, partial_top_tuple = fields
+
             logging.info(f"Received top from client {client_id}")
-            self.output_queue.send(message_protocol.internal.serialize([client_id, fruit_top]))
+            # crea la entrada vacía si no existe, (0 parciales, lista vacía)
+            entry = self.partials_by_client.setdefault(client_id, [0, []])
+            entry[0] += 1           # contador de parciales
+            entry[1].extend(fruit_item.FruitItem(f, a) for f, a in partial_top_tuple)
+            logging.info(
+                f"Partial top for client {client_id}: {entry[0]}/{AGGREGATION_AMOUNT}"
+            )
+
+            # todavía faltan aggregators: no emitir
+            if entry[0] == AGGREGATION_AMOUNT:
+                _, items = self.partials_by_client.pop(client_id)
+                top = sorted(items, reverse=True)[:TOP_SIZE]
+                self.output_queue.send(message_protocol.internal.serialize(
+                    [client_id, [(i.fruit, i.amount) for i in top]]
+                ))
+
         else:
             self.output_queue.send(message_protocol.internal.serialize(fields))
         ack()

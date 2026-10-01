@@ -3,7 +3,7 @@ import logging
 import threading
 
 import pika
-
+import zlib
 
 from common import middleware, message_protocol, fruit_item
 
@@ -60,6 +60,10 @@ class SumFilter:
         
 
 
+    def _aggregator_for(self, client_id, fruit):
+        # ejemplo: zlib.crc32("3:banana".encode()) --> 3493508999 % 3 ---> 2
+        return zlib.crc32(f"{client_id}:{fruit}".encode()) % AGGREGATION_AMOUNT
+
 
     def _process_data(self, client_id, fruit, amount):
         # se van sumando las frutas y se guardan localmente
@@ -83,12 +87,13 @@ class SumFilter:
             amount_by_fruit = self.amount_by_fruit_by_client.pop(client_id, {})
 
         # al recibir EOF emite a cada exchange el total acumulado por cada fruta (ej. banana 3, manzana 7, etc. a cada aggregation)
-        # de un cliente en particular
+        # de un cliente en particular, hasheado para poder distribuir equitativamente entre los aggregators
         for final_fruit_item in amount_by_fruit.values():
-            for out in data_outputs:
-                out.send(message_protocol.internal.serialize(
-                    [client_id, final_fruit_item.fruit, final_fruit_item.amount]
-                ))
+            idx = self._aggregator_for(client_id, final_fruit_item.fruit)
+            # en base al indice del aggregator manda los sums
+            data_outputs[idx].send(message_protocol.internal.serialize(
+                [client_id, final_fruit_item.fruit, final_fruit_item.amount]
+            ))
 
         logging.info(f"Broadcasting EOF message for client {client_id}")
         for out_exchange in data_outputs:
@@ -141,8 +146,6 @@ class SumFilter:
 
 def main():
     logging.basicConfig(level=logging.INFO)
-    #TODO: Borrar esta linea, es solo para debug
-    logging.getLogger("pika").setLevel(logging.ERROR)
     sum_filter = SumFilter()
     sum_filter.start()
     return 0

@@ -125,10 +125,11 @@ En resumen: el top está mal porque faltan los parciales de sum_1 y sum_2. Solo 
 
 
 
+### Escenario 4
+Sharding se refiere a repartir un conjunto de datos entre varias instancias. Cada instancia hace una parte del trabajo y luego se combinan
 
 
-
-
+zlib.crc32 es un checksum CRC32, un algoritmo determinístico y estándar
 
 
 
