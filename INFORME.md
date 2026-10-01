@@ -36,9 +36,9 @@ Para mantener el comportamiento del Middleware se utiliza un exchange dedicado, 
 El flujo es:
 1. El sum que recibe el EOF original por `input_queue`, emite sus parciales a los aggregators.
 2. Ese mismo sum publica `[client_id, sum_id]` en `SUM_CONTROL_EXCHANGE`.
-3. RabbitMQ le entrega una copia a cada sum (incluido el emisor).
+3. El middleware le entrega una copia a cada sum (incluido el emisor).
 4. Cada sum, al recibir el aviso, verifica que no sea suyo (`sum_sender_id != self.sum_id`) y emite sus propios parciales a los aggregators.
-5. Cada sum manda su EOF al aggregation.
+
 
 En el sum hay dos threads
 - `input_queue`: datos y EOF original (hilo principal).
@@ -50,7 +50,7 @@ En los tests funciona sin poner el prefetch=1 debido al volumen de los datasets 
 
 ### Coordinación de Aggregation
 Cuando hay N sums y M aggregators:
-- Cada sum emite sus parciales a un aggregator (elegido por hash con crc32 sobre client:fruta. No se usa hash de python porque es aleatorio por proceso)
+- Cada sum emite sus parciales a un aggregator
 - Cada sum emite su EOF a todos los aggregators.
 
 Como cada sum manda su propio EOF, el aggregation recibe N EOFs por cliente (uno por cada sum). No puede emitir el top con el primero que llega, porque le faltarían los parciales de los otros sums. Para ello se hace un conteo de EOFs
@@ -69,27 +69,29 @@ El handler pide frenar el consumo de cada conexión usando add_callback_threadsa
 
 ### Escalabilidad
 ##### Escalado respecto a clientes
-El gateway atiende a cada cliente en un proceso separado. Cada cliente tiene su propia instancia de MessageHandler con un client_id único que viaja en todos los mensajes internos.
+El gateway atiende a cada cliente en un proceso separado segun la cantidad de CPUs. Cada cliente tiene su propia instancia de MessageHandler con un client_id único que viaja en todos los mensajes internos.
 
 En sum, aggregation y join, el estado se mantiene por cliente (amount_by_fruit_by_client[client_id], fruit_top_by_client[client_id], partials_by_client[client_id]). Eso permite procesar varios clientes concurrentemente sin que se mezclen sus acumulados.
 
 ##### Escalado respecto a volumen de datos
-N sums reparten los mensajes de input_queue (working queue). A mayor cantidad de instancias de sums, menor mensajes dentra cada uno
+N sums reparten los mensajes de input_queue (working queue). A mayor cantidad de instancias de sums, menor mensajes dentro de cada uno
 
-M aggregators se reparten las frutas por hash. A mayor cantidad de instancias de aggregators, mens frutas por aggregator
+M aggregators se reparten las frutas por hash. A mayor cantidad de instancias de aggregators, menos frutas por aggregator
 
-El estado en cada sum y aggregation se mantiene en memoria
+El estado en cada sum y aggregation se mantiene en memoria. La memoria de cada sum es proporcional a las frutas distintas por cliente activo, no a la cantidad de registros. Y entre sum y aggregation viajan a lo sumo (frutas distintas * sums) mensajes por cliente, sin importar cuántos registros haya
 
 ##### Escalado respecto a la cantidad de controles
-Con más sums y más aggregators, el sistema escala linealmente:
+Con más sums y más aggregators, el sistema escala aproximadamente de forma lineal:
 
 Sums: RabbitMQ reparte round-robin. Cada sum procesa 1/N de los mensajes.
 
 Aggregators: el hash `zlib.crc32(f"{client_id}:{fruit}") % M` distribuye las frutas entre los M aggregators. Como incluye el client_id, distribuye entre clientes también, evitando que todas las frutas de un cliente caigan en el mismo aggregator.
 
-Join: espera M parciales por cliente.
+Join: espera M parciales por cliente. (M * TOP_SIZE ítems por cliente)
 
 ##### Sharding por hash
+Se eligió hash con crc32 sobre client:fruta. No se usa hash de python porque es aleatorio por proceso
+
 Para repartir las frutas entre los aggregators se usa:
 
 > idx = zlib.crc32(f"{client_id}:{fruit}".encode()) % AGGREGATION_AMOUNT
