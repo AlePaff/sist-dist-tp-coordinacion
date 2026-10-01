@@ -18,7 +18,7 @@ AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 class SumFilter:
 
     def _build_data_output_exchanges(self):
-        # crea exchanges (es la oficina de correos, mensajes para ser despachados a las distintas queues)
+        # crea exchanges, donde los mensajes son despachados a las distintas queues
         return [
             # pone las routing keys
             middleware.MessageMiddlewareExchangeRabbitMQ(
@@ -44,6 +44,9 @@ class SumFilter:
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, INPUT_QUEUE
         )
+        # NOTE: cambio sencillo para garantizar (casi al 100%) orden de mensajes
+        # self.input_queue.channel.basic_qos(prefetch_count=1)
+
         self.main_data_output_exchanges = self._build_data_output_exchanges()
         self.main_control_publisher = self._build_control_exchange()  # solo send(), usado por hilo principal
 
@@ -74,9 +77,9 @@ class SumFilter:
 
     def _flush_client(self, client_id, data_outputs):
         """Envía el acumulado + EOF a los aggregators usando las conexiones
-        que le pasan (las del hilo que la llama). Aca no se avisa a otros SUM."""
+        que le pasan (las del hilo que la llama). NOTE: Aca no se avisa a otros SUM."""
 
-        # logging.info(f"Broadcasting data messages for client {client_id}")
+        logging.debug(f"Broadcasting data messages for client {client_id}")
         # obtiene el acumulado del cliente que termino (y lo saca del dict)
         with self.state_lock:
             amount_by_fruit = self.amount_by_fruit_by_client.pop(client_id, {})
@@ -143,22 +146,22 @@ class SumFilter:
                 args=(self.process_control_eof,)
             )
         control_thread.start()
-        
-        # inicia el consumo de la cola de entrada
-        self.input_queue.start_consuming(self.process_data_messsage)
 
+        try:
+            # inicia el consumo de la cola de entrada
+            self.input_queue.start_consuming(self.process_data_messsage)
+        finally:
+            # el hilo principal salió (SIGTERM o error): esperar al de control
+            control_thread.join()
 
-        # el hilo principal salió (SIGTERM o error): esperar al de control
-        control_thread.join()
-
-        # cerrar todo, cada recurso en su hilo correspondiente
-        self.input_queue.close()
-        self.control_consumer.close()
-        self.main_control_publisher.close()
-        for e in self.main_data_output_exchanges:
-            e.close()
-        for e in self.control_data_outputs:
-            e.close()
+            # cerrar todo, cada recurso en su hilo correspondiente
+            self.input_queue.close()
+            self.control_consumer.close()
+            self.main_control_publisher.close()
+            for e in self.main_data_output_exchanges:
+                e.close()
+            for e in self.control_data_outputs:
+                e.close()
 
 def main():
     logging.basicConfig(level=logging.INFO)

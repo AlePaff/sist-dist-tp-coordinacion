@@ -1,5 +1,6 @@
 import os
 import logging
+import signal
 
 from common import middleware, message_protocol, fruit_item
 
@@ -49,7 +50,6 @@ class JoinFilter:
             f"Partial top for client {client_id}: {entry[0]}/{AGGREGATION_AMOUNT}"
         )
 
-        # todavía faltan aggregators: no emitir
         if entry[0] == AGGREGATION_AMOUNT:
             _, items = self.partials_by_client.pop(client_id)
             top = sorted(items, reverse=True)[:TOP_SIZE]
@@ -69,8 +69,8 @@ class JoinFilter:
 def main():
     logging.basicConfig(level=logging.INFO)
     join_filter = JoinFilter()
+    signal.signal(signal.SIGTERM, join_filter.handle_sigterm)
     join_filter.start()
-
     return 0
 
 
